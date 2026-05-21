@@ -1,5 +1,5 @@
 ## Copyright notice
-Copyright (c) 2026 Ethan Brett
+Copyright (c) 2026 Ethan Brett  
 Licensed under the MIT License. See LICENSE file in the project root for full license information
 
 # GodotGenericSceneManager
