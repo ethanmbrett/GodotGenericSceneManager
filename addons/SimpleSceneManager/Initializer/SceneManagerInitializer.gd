@@ -1,6 +1,8 @@
+# Copyright (c) 2026 Ethan Brett
+# Licensed under the MIT License. See LICENSE file in the project root for full license information
+
 # Helper node spawned in when the first scene is loaded
 # Sets up the scene manager
-
 extends Node
 class_name SceneManagerInitializer
 
