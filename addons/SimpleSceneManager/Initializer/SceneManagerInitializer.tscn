@@ -1,0 +1,7 @@
+[gd_scene format=3 uid="uid://2htapqft1jrq"]
+
+[ext_resource type="Script" uid="uid://cjdmle3o0yukc" path="res://addons/SimpleSceneManager/Initializer/SceneManagerInitializer.gd" id="1_p1uek"]
+
+[node name="SceneManagerInitializer" type="Node" unique_id=1122889176]
+script = ExtResource("1_p1uek")
+StartScene = "MainMenu"
