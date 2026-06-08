@@ -8,6 +8,15 @@ extends Node
 # The list of loadable scenes
 var SceneRegistry: Dictionary[String, PackedScene]
 
+@export_group("Initialization")
+# List of scene names and files to send to the SceneManager
+# Modify in the default version scene as necessary
+@export var InitializeScenes: Dictionary[String, PackedScene]
+
+# Called when the node enters the scene tree for the first time.
+func _ready() -> void:
+	AddScenesToRegistry(InitializeScenes)
+
 # Bread-and-butter function of the manager. Loads a scene by name
 # and makes it the new scene root.
 func LoadSceneFromRegistry(SceneName: String):
