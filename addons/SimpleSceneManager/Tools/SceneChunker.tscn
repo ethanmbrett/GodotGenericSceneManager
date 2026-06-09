@@ -1,6 +1,0 @@
-[gd_scene format=3 uid="uid://cwrpxbqvqm0nc"]
-
-[ext_resource type="Script" uid="uid://ct4iv5jpou1ue" path="res://addons/SimpleSceneManager/Tools/SceneChunker.gd" id="1_wix2u"]
-
-[node name="SceneChunker" type="Node" unique_id=963240961]
-script = ExtResource("1_wix2u")
