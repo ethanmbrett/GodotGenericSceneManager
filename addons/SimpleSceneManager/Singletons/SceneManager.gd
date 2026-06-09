@@ -3,90 +3,167 @@
 
 # Singleton scene manager
 # Handles all loading operations
+@tool
 extends Node
 
 # The list of loadable scenes
 var SceneRegistry: Dictionary[String, String]
 # The name of any scene currently being loaded. Set to be empty if none.
 var CurrentLoadingScenePath: String = ""
+# Whether the chunk list has been loaded into memory
+var CanLoad: bool = false
 
 @export_group("Initialization")
 # List of scene names and file paths to initialize to the SceneManager
 @export var InitializeScenes: Dictionary[String, String]
 
+var ChunkLists: Dictionary[String, ResourceList]
+var RequiredChunks: Array[String]
+var LoadedChunks: Array[Resource]
+signal UpdateChunkedLoading
+
+signal UpdateResourceLoading
+
 # Called when the node enters the scene tree for the first time.
 func _ready() -> void:
 	AddScenesToRegistry(InitializeScenes)
+	LoadedChunks.clear()
+	RequiredChunks.clear()
+	var SceneLoadChunks: ChunkList = ResourceLoader.load(SceneChunker.GlobalChunkListPath)
+	# This loop just pulls the chunk lists into memory so we can access them at will
+	for ChunkKey in SceneLoadChunks.SceneChunks.keys():
+		var ChunkPath: String = SceneLoadChunks.SceneChunks[ChunkKey]
+		_StartResourceLoad(ChunkPath);
+		var ChunkStatus: float = _CheckResourceLoadStatus(ChunkPath)
+		while(ChunkStatus != 1.0 and ChunkStatus != -1.0):
+			await  get_tree().process_frame
+			ChunkStatus = _CheckResourceLoadStatus(ChunkPath)
+		ChunkLists[ChunkKey] = FinalizeResourceLoad(ChunkPath)
 
 # One of the bread-and-butter function of the manager. Starts loading a scene through the Resource Loader
 func StartSceneLoad(SceneName: String):
 	if(SceneRegistry.keys().find(SceneName) == -1):
 		push_error("Attempting to load unregistered scene with name: " + SceneName)
-		return
+		get_tree().quit()
 	CurrentLoadingScenePath = SceneRegistry[SceneName]
-	ResourceLoader.load_threaded_request(CurrentLoadingScenePath)
+	# Check if we have Chunks to preload
+	if(ChunkLists.keys().has(CurrentLoadingScenePath)):
+		RequiredChunks = _CreateRequiredChunkList(CurrentLoadingScenePath)
+	_LoadSceneChunked(SceneName)
 
-# One of the bread-and-butter function of the manager. Checks the current status of a scene load operation
-# Returns -1.0 if load is not in progress or fails, else returns the progress of loading the scene
-func CheckSceneLoadStatus() -> float:
-	if(CurrentLoadingScenePath == ""):
-		push_error("Attempting to check status of scene load operation when no load is in progress!")
-		return -1.0
-	var LoaderProgress: Array
-	var LoaderStatus = ResourceLoader.load_threaded_get_status(CurrentLoadingScenePath, LoaderProgress)
-	if (LoaderStatus == ResourceLoader.ThreadLoadStatus.THREAD_LOAD_FAILED or len(LoaderProgress) < 1):
-		push_error("Scene load operation failed!")
-		return -1.0
-	if (LoaderStatus == ResourceLoader.ThreadLoadStatus.THREAD_LOAD_INVALID_RESOURCE):
-		push_error("Scene load operation failed due to invalid resource!")
-		return -1.0
-	return LoaderProgress[0]
+# Recursively goes through all required scenes to amass a list of all necessary resources to load.
+# I recommend not touching this function directly. It can very easily crash your game if
+# improperly used.
+func _CreateRequiredChunkList(ScenePath: String, ParentPath: String = "") -> Array[String]:
+	var SceneChunkList: ResourceList = ChunkLists[ScenePath]
+	if (ParentPath != ""):
+		if(SceneChunkList.Resources.has(ParentPath) or SceneChunkList.Scenes.has(ParentPath)):
+			push_error("Circular dependency detected between Scenes located at: " + ScenePath + " and " + ParentPath)
+			get_tree().quit()
+	var OutChunks: Array[String]
+	OutChunks.append_array(SceneChunkList.Resources)
+	for Scene in SceneChunkList.Scenes:
+		if(!OutChunks.has(Scene)):
+			OutChunks.append(Scene)
+		if (!ChunkLists.keys().has(Scene)):
+			continue
+		OutChunks.append_array(_CreateRequiredChunkList(Scene, ScenePath))
+	return OutChunks
+
+func _LoadSceneChunked(SceneName: String):
+	var SceneSize: float = FileAccess.get_size(CurrentLoadingScenePath)
+	var TotalSize: float = SceneSize
+	var ResourceSizes: Array[float]
+	var LoadProgress: Array[float]
+	# Grab the size of all required files
+	for Res in RequiredChunks:
+		var ResSize: float = FileAccess.get_size(Res)
+		TotalSize += ResSize
+		ResourceSizes.append(ResSize)
+	# Load each resource. Individually
+	for ResIndex in range(len(RequiredChunks)):
+		var ResPath: String = RequiredChunks[ResIndex]
+		LoadProgress.append(0.0)
+		_StartResourceLoad(ResPath)
+		var ResStatus: float = _CheckResourceLoadStatus(ResPath)
+		while(ResStatus != 1.0 and ResStatus != -1.0):
+			LoadProgress[ResIndex] = ResStatus * ResourceSizes[ResIndex] / TotalSize
+			UpdateChunkedLoading.emit(LoadProgress, false)
+			await  get_tree().process_frame
+			ResStatus = _CheckResourceLoadStatus(ResPath)
+		LoadedChunks.append(FinalizeResourceLoad(ResPath))
+	LoadProgress.append(0.0)
+	var SceneIndex = len(LoadProgress) - 1
+	_StartResourceLoad(CurrentLoadingScenePath)
+	var SceneStatus: float = _CheckResourceLoadStatus(CurrentLoadingScenePath)
+	while(SceneStatus != 1.0 and SceneStatus != -1.0):
+		LoadProgress[SceneIndex] = SceneStatus * SceneSize / TotalSize
+		UpdateChunkedLoading.emit(LoadProgress, false)
+		await  get_tree().process_frame
+		SceneStatus = _CheckResourceLoadStatus(CurrentLoadingScenePath)
+	UpdateChunkedLoading.emit(LoadProgress, true)
 
 # One of the bread-and-butter function of the manager. Finalizes the load operation and sets the loaded scene
 # to be the new tree root.
-func FinalizeSceneLoad():
+func FinalizeChunkedSceneLoad():
 	if(CurrentLoadingScenePath == ""):
 		push_error("Attempting to finish scene load operation when no scene load is in progress!")
-		return
+		get_tree().quit()
 	if(ResourceLoader.load_threaded_get_status(CurrentLoadingScenePath) != ResourceLoader.ThreadLoadStatus.THREAD_LOAD_LOADED):
 		push_error("Attempting to finalize scene load operation before the scene load operation is complete!")
 		return
 	var LoadedScene: PackedScene = ResourceLoader.load_threaded_get(CurrentLoadingScenePath)
-	CurrentLoadingScenePath = ""
 	get_tree().change_scene_to_packed.call_deferred(LoadedScene)
+	CurrentLoadingScenePath = ""
+	RequiredChunks.clear()
+	LoadedChunks.clear()
 
 # Function for loading individual resources asynchronously. Starts the load operation
-func StartResourceLoad(ResourcePath: String):
+func _StartResourceLoad(ResourcePath: String):
 	if(!ResourceLoader.exists(ResourcePath)):
 		push_error("Attempting load resource with invalid path: " + ResourcePath)
-		return
+		get_tree().quit()
 	ResourceLoader.load_threaded_request(ResourcePath)
 
 # Function for loading individual resources asynchronously. Checks the status of a load operation
-# Returns -1.0 and throws an error if the operation fails, else returns the progress of the operation
-func CheckResourceLoadStatus(ResourcePath: String) -> float:
+# Crashes and throws an error if the operation fails, else returns the progress of the operation
+func _CheckResourceLoadStatus(ResourcePath: String) -> float:
 	if(!ResourceLoader.exists(ResourcePath)):
 		push_error("Attempting to check resource load operation with invalid path: " + ResourcePath)
-		return -1.0
+		get_tree().quit()
 	var LoaderProgress: Array
 	var LoaderStatus: ResourceLoader.ThreadLoadStatus = ResourceLoader.load_threaded_get_status(ResourcePath, LoaderProgress)
 	if(LoaderStatus == ResourceLoader.ThreadLoadStatus.THREAD_LOAD_INVALID_RESOURCE):
 		push_error("Attempting to check resource load operation without starting the load operation: " + ResourcePath)
-		return -1.0
+		get_tree().quit()
 	if(LoaderStatus == ResourceLoader.ThreadLoadStatus.THREAD_LOAD_FAILED or len(LoaderProgress) < 1):
 		push_error("Resource load failed: " + ResourcePath)
-		return -1.0
+		get_tree().quit()
+	if(LoaderStatus == ResourceLoader.ThreadLoadStatus.THREAD_LOAD_LOADED):
+		return 1.0
 	return LoaderProgress[0]
 
+# User side function for loading a resource and signaling when it is ready
+func LoadResource(ResourcePath: String):
+	_StartResourceLoad(ResourcePath)
+	var ResStatus = _CheckResourceLoadStatus(ResourcePath)
+	while(ResStatus != 1.0 and ResStatus != -1.0):
+		await  get_tree().process_frame
+		ResStatus = _CheckResourceLoadStatus(ResourcePath)
+	if(ResStatus == -1.0):
+		push_error("Failed to load resource: " + ResourcePath)
+		get_tree().quit()
+	UpdateChunkedLoading.emit(ResourcePath)
+
 # Function for loading individual resources asynchronously. Returns a loaded resource
-# Returns null and throws an error if the operation fails, else returns resource
+# Crashes and throws an error if the operation fails, else returns resource
 func FinalizeResourceLoad(ResourcePath: String) -> Resource:
 	if(!ResourceLoader.exists(ResourcePath)):
 		push_error("Attempting to finalize resource load operation with invalid path: " + ResourcePath)
-		return null
+		get_tree().quit()
 	if(ResourceLoader.load_threaded_get_status(ResourcePath) == ResourceLoader.ThreadLoadStatus.THREAD_LOAD_INVALID_RESOURCE):
 		push_error("Attempting to finalize resource load operation without starting the load operation: " + ResourcePath)
-		return null
+		get_tree().quit()
 	if(ResourceLoader.load_threaded_get_status(ResourcePath) != ResourceLoader.ThreadLoadStatus.THREAD_LOAD_LOADED):
 		push_error("Attempting to finalize resource load operation before the resource load operation is complete: " + ResourcePath)
 		return null
@@ -97,14 +174,14 @@ func FinalizeResourceLoad(ResourcePath: String) -> Resource:
 func AddSceneToRegistry(SceneName: String, ScenePath: String):
 	if(SceneRegistry.keys().find(SceneName) != -1):
 		push_error("Attempting to add scene to registry with in-use name: " + SceneName)
-		return
+		get_tree().quit()
 	if(!ResourceLoader.exists(ScenePath, "PackedScene")):
 		push_error("Attempting to add scene to registry with invalid scene path: " + ScenePath)
-		return
+		get_tree().quit()
 	# Due to a quirk of the exists function, we still have to make sure we're looking at a .tscn
 	if(ScenePath.get_extension() != "tscn"):
 		push_error("Attempting to add scene to registry with invalid scene path: " + ScenePath)
-		return
+		get_tree().quit()
 	SceneRegistry[SceneName] = ScenePath
 	print(SceneRegistry)
 
@@ -120,14 +197,14 @@ func AddScenesToRegistry(Scenes: Dictionary[String, String]):
 func ModifySceneInRegistry(SceneName: String, ScenePath: String):
 	if(SceneRegistry.keys().find(SceneName) == -1):
 		push_error("Attempting to modify unregistered scene with name: " + SceneName)
-		return
+		get_tree().quit()
 	if(!ResourceLoader.exists(ScenePath, "PackedScene")):
 		push_error("Attempting to modify scene in registry to point to invalid scene path: " + ScenePath)
-		return
+		get_tree().quit()
 	# Due to a quirk of the exists function, we still have to make sure we're looking at a .tscn
 	if(ScenePath.get_extension() != "tscn"):
 		push_error("Attempting to modify scene in registry with invalid scene path: " + ScenePath)
-		return
+		get_tree().quit()
 	SceneRegistry[SceneName] = ScenePath
 
 # Same as the above for a group of scenes.
@@ -140,7 +217,7 @@ func ModifyScenesInRegistry(Scenes: Dictionary[String, String]):
 func RemoveSceneFromRegistry(SceneName: String):
 	if(SceneRegistry.keys().find(SceneName) == -1):
 		push_error("Attempting to remove unregistered scene with name: " + SceneName)
-		return
+		get_tree().quit()
 	SceneRegistry.erase(SceneName)
 
 # Same as the above for a group of scenes.

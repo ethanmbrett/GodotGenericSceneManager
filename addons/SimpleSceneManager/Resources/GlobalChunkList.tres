@@ -1,0 +1,7 @@
+[gd_resource type="Resource" script_class="ChunkList" format=3 uid="uid://c506vf44jtekh"]
+
+[ext_resource type="Script" uid="uid://cp7bwrrpw2lmg" path="res://addons/SimpleSceneManager/Resources/ChunkList.gd" id="2_tx87f"]
+
+[resource]
+script = ExtResource("2_tx87f")
+metadata/_custom_type_script = "uid://cp7bwrrpw2lmg"
